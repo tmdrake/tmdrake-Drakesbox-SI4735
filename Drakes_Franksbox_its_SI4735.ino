@@ -5,14 +5,14 @@ https://www.pasadenahosthunters.org
 
 This code is in the public domain.
 
-Two switch sets, active low, internal pull-ups:
-  Volume set: A5 up, A4 down
-  Band set:   A3 AM, A2 FM
+Two (ON)-OFF-(ON) switches, momentary, center off, active low:
+  Volume: A5 up, center, A4 down. Up and down cannot be on together.
+  Band:   A3 AM, center, A2 FM. AM and FM cannot be on together.
 
-Hold both band buttons during the startup message to set the
-scan delays. Volume up/down changes the delay. Press one band
-button to pick FM or AM. Hold both band buttons to save, or
-both volume buttons to cancel.
+Hold the volume switch either way during the startup message to
+set the scan delays. Volume changes the delay. Flick the band
+switch to pick FM or AM. Hold the band switch to save. Wait,
+and the menu cancels.
 
 Volume, band, and both scan delays are stored in EEPROM.
 The scan always restarts at 97.3 MHz or 520 kHz.
@@ -42,7 +42,8 @@ const uint16_t DELAY_STEP_MS = 50;
 const unsigned long DEBOUNCE_MS = 30;
 const unsigned long REPEAT_START_MS = 450;
 const unsigned long REPEAT_MS = 150;
-const unsigned long CHORD_MS = 800;
+const unsigned long SAVE_HINT_MS = 700;
+const unsigned long SAVE_HOLD_MS = 1500;
 const unsigned long MENU_IDLE_MS = 30000;
 const int FM_START = 9730;
 const int FM_TOP = 10800;
@@ -241,14 +242,27 @@ void waitForRelease() {
   }
 }
 
+void finishMenu(bool save, uint16_t keepFm, uint16_t keepAm) {
+  if (save) {
+    saveSettings();
+    lcdClear();
+    Serial.print("Saved");
+  } else {
+    settings.fmDelayMs = keepFm;
+    settings.amDelayMs = keepAm;
+    lcdClear();
+    Serial.print("Cancel");
+  }
+  delay(700);
+}
+
 void runSetupMenu() {
   uint16_t keepFm = settings.fmDelayMs;
   uint16_t keepAm = settings.amDelayMs;
   bool editFm = (settings.band == FM);
   unsigned long lastAction = millis();
-  bool bandChord = false;
-  bool volChord = false;
-  unsigned long chordMs = 0;
+  unsigned long bandHoldMs = millis();
+  bool saving = false;
 
   showDelay(editFm);
 
@@ -258,38 +272,34 @@ void runSetupMenu() {
     bool dnEdge = updateKey(keyVolDn);
     bool amEdge = updateKey(keyAm);
     bool fmEdge = updateKey(keyFm);
-    bool bandsHeld = keyAm.down && keyFm.down;
-    bool volsHeld = keyVolUp.down && keyVolDn.down;
+    // One (ON)-OFF-(ON) switch. Only one side can be held.
+    bool bandHeld = (keyAm.down || keyFm.down) && !(keyAm.down && keyFm.down);
 
-    if (bandsHeld) {
-      volChord = false;
-      if (!bandChord) {
-        bandChord = true;
-        chordMs = now;
-      } else if (now - chordMs >= CHORD_MS) {
-        saveSettings();
-        lcdClear();
-        Serial.print("Saved");
-        delay(700);
-        return;
-      }
-    } else if (volsHeld) {
-      bandChord = false;
-      if (!volChord) {
-        volChord = true;
-        chordMs = now;
-      } else if (now - chordMs >= CHORD_MS) {
-        settings.fmDelayMs = keepFm;
-        settings.amDelayMs = keepAm;
-        lcdClear();
-        Serial.print("Cancel");
-        delay(700);
-        return;
-      }
-    } else {
-      bandChord = false;
-      volChord = false;
+    if (fmEdge || amEdge) {
+      editFm = fmEdge;
+      bandHoldMs = now;
+      saving = false;
+      showDelay(editFm);
+      lastAction = now;
+    }
 
+    if (bandHeld && (now - bandHoldMs >= SAVE_HOLD_MS)) {
+      finishMenu(true, keepFm, keepAm);
+      return;
+    }
+
+    if (bandHeld && !saving && (now - bandHoldMs >= SAVE_HINT_MS)) {
+      lcdClear();
+      Serial.print("Saving");
+      saving = true;
+    }
+
+    if (!bandHeld && saving) {
+      saving = false;
+      showDelay(editFm);
+    }
+
+    if (!bandHeld) {
       if ((upEdge || keyRepeat(keyVolUp)) && !keyVolDn.down) {
         nudgeDelay(editFm, DELAY_STEP_MS);
         showDelay(editFm);
@@ -300,23 +310,10 @@ void runSetupMenu() {
         showDelay(editFm);
         lastAction = now;
       }
-      if (fmEdge && !keyAm.down) {
-        editFm = true;
-        showDelay(editFm);
-        lastAction = now;
-      }
-      if (amEdge && !keyFm.down) {
-        editFm = false;
-        showDelay(editFm);
-        lastAction = now;
-      }
     }
 
     if (now - lastAction >= MENU_IDLE_MS) {
-      saveSettings();
-      lcdClear();
-      Serial.print("Saved");
-      delay(700);
+      finishMenu(false, keepFm, keepAm);
       return;
     }
   }
@@ -385,10 +382,10 @@ void setup() {
   bool hinted = false;
   while (millis() - splashStart < SPLASH_MS) {
     pollKeys();
-    if (keyAm.down && keyFm.down) enterSetup = true;
+    if (keyVolUp.down || keyVolDn.down) enterSetup = true;
     if (!hinted && millis() - splashStart >= BUILD_DATE_MS) {
       lcdClear();
-      Serial.print("Hold AM+FM");
+      Serial.print("Hold VOL");
       hinted = true;
     }
   }
@@ -420,7 +417,7 @@ void loop() {
     if ((dnEdge || keyRepeat(keyVolDn)) && !keyVolUp.down) changeVolume(-1);
   }
 
-  // A band chord is the setup gesture. Ignore it while running.
+  // AM and FM are opposite throws of one switch, so both pins low is ignored.
   // Time the status message after begin(), which blocks for several hundred ms.
   if (!(keyAm.down && keyFm.down)) {
     if (amEdge && !keyFm.down) {

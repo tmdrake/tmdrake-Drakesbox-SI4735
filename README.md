@@ -17,7 +17,7 @@ Frank Sumption's Frank's Box (2002) is the original open-audio sweep radio. Late
 | FM coverage | 97.3–108.0 MHz, 100 kHz steps | Full FM dial of that radio | 88–108 MHz, default 150 kHz steps |
 | AM coverage | 520–1710 kHz, 10 kHz steps | Only if that radio was hacked for AM | Needs an HF-capable stick |
 | Dwell | 100–2000 ms, separate FM and AM values, default 200 ms | Fixed by the radio | 10–500 ms |
-| Controls | Two switch pairs | The radio's own buttons | On-screen HUD |
+| Controls | Two (ON)-OFF-(ON) switches | The radio's own buttons | On-screen HUD |
 | Memory | EEPROM: volume, band, both dwells | None | Settings file on the PC |
 
 The SI4735 can tune shortwave and longwave. This sketch does not. It stays on the AM and FM broadcast sweeps a shack hack uses.
@@ -28,9 +28,9 @@ The SI4735 can tune shortwave and longwave. This sketch does not. It stays on th
 - [SparkFun SI4735 AM & FM Shield](https://github.com/sparkfun/SI4735_AM_FM_Shield) (DEV-10342). Schematic in this repo: `SI4735 Shield-v12.pdf`. The shield design is SparkFun's, Creative Commons ShareAlike 3.0.
 - Serial display at 9600 baud. Lines are written for a 16-column display.
 - Audio amp enabled on pin 3. The pin stays low until the first station is tuned.
-- Two switch sets, each switch to ground, internal pull-ups:
-  - Volume: A5 up, A4 down
-  - Band: A3 AM, A2 FM
+- Two momentary (ON)-OFF-(ON) switches, each throw wired to ground, internal pull-ups. Center is off, and the switch springs back. The two throws of one switch cannot be on at the same time.
+  - Volume: A5 up, center, A4 down
+  - Band: A3 AM, center, A2 FM
 
 The shield antenna switch has to match the band. FM uses the whip jack. AM uses the ferrite loop. The sketch cannot flip that switch.
 
@@ -43,22 +43,20 @@ Library wiring, from the SparkFun library: power on pin 8, radio reset on pin 9,
 Normal run:
 
 - Volume up / volume down change the level from 0 to 63. The display shows `Vol 12` and the sweep pauses about a second so the number can be read. The level is saved after you let go.
-- AM or FM restarts that band at 520 kHz or 97.3 MHz, restores the saved volume, and saves the band. One press does this once.
-- Holding both buttons of a pair does nothing while the box is already running. The band pair is the setup chord, and it is only read at boot.
+- Flick AM or FM to restart that band at 520 kHz or 97.3 MHz. The saved volume comes back, and the band is saved. Letting go returns the switch to center.
 
 Boot:
 
 1. `ROM:` plus the build date, for 2 seconds. Example: `ROM:Nov 12 2026`.
-2. `Hold AM+FM` until 3.5 seconds from power-up.
+2. `Hold VOL` until 3.5 seconds from power-up.
 3. The radio starts on the saved band and volume. The display shows `FM vol 12` or `AM vol 12`, then the sweep takes over.
 
-Hold both band buttons at any time during those 3.5 seconds to open the dwell menu. Let go when the menu appears.
+Hold the volume switch either way during those 3.5 seconds to open the dwell menu. Let it spring back to center when the menu appears.
 
 - Volume up / down changes the dwell in 50 ms steps, from 100 ms to 2000 ms. Hold to repeat.
-- Tap FM or AM to choose which dwell is on screen (`FM 200ms` or `AM 200ms`).
-- Hold both band buttons to save.
-- Hold both volume buttons to cancel.
-- Leave it for 30 seconds and it saves.
+- Flick the band switch to FM or AM to choose which dwell is on screen (`FM 200ms` or `AM 200ms`).
+- Hold the band switch either way for about a second and a half. The screen says `Saving`, then `Saved`.
+- Let it sit for 30 seconds and it cancels. The old dwells stay.
 
 The chip's own volume starts at 5 inside `radio.begin()`, including every band change. The sketch writes the saved level back with the SI4735 volume property (`0x4000`) after each begin.
 
