@@ -1,54 +1,114 @@
-/* Drakes Franks Box
+/* Drake's Franks Box
 
 Dennis Liang
 https://www.pasadenahosthunters.org
 
-This code is in the public domain.
+Public domain. See LICENSE and README.md.
 
-Two (ON)-OFF-(ON) switches, momentary, center off, active low:
-  Volume: A5 up, center, A4 down. Up and down cannot be on together.
+What it does
+  An SI4735 AM/FM receiver that keeps sweeping with the audio left open.
+  That is the same idea as a shack-hack spirit box: do not stop on a
+  station, and do not mute the noise between stations.
+
+Hardware
+  Arduino Uno and a SparkFun SI4735 shield.
+  NEC FIPC8367 character VFD, 9600 baud, 20 columns, two lines.
+  Audio amp enable on pin 3. High turns the amp on.
+  Pin 13 is the radio SPI clock. This sketch does not use it as an LED.
+
+  Two momentary (ON)-OFF-(ON) switches, center off, wired to ground.
+  The pin mode is INPUT_PULLUP, so a throw reads LOW.
+  Volume: A5 up, center, A4 down. The two throws cannot be on together.
   Band:   A3 AM, center, A2 FM. AM and FM cannot be on together.
 
-Hold the volume switch either way during the startup message to
-set the scan delays. Volume changes the delay. Flick the band
-switch to pick FM or AM. Hold the band switch to save. Wait,
-and the menu cancels.
+How to use it
+  Boot shows "ROM:" plus the compiler date (__DATE__), then "Hold VOL".
+  Hold the volume switch either way during that splash to set scan delays.
+  In the menu, volume changes the delay and the band switch picks FM or AM.
+  Hold the band switch to save. Leave the menu alone and it cancels.
+  While scanning, volume changes the level and a flick of the band switch
+  restarts that band at 97.3 MHz or 520 kHz.
 
-Volume, band, and both scan delays are stored in EEPROM.
-The scan always restarts at 97.3 MHz or 520 kHz.
-
-The boot line "ROM:" is the compiler build date (__DATE__).
-It changes on every compile, from the IDE or from build.ps1.
+What is remembered
+  EEPROM stores volume, band, and one scan delay per band.
+  The live frequency is not stored. A sweep restarts at the bottom of the band.
 */
-
-const unsigned long BUILD_DATE_MS = 2000;
-const unsigned long SPLASH_MS = 3500;
 
 #include <Si4735.h>
 #include <EEPROM.h>
 
-const int ampPin = 3;
-const int pinVolUp = A5;
-const int pinVolDn = A4;
-const int pinAm = A3;
-const int pinFm = A2;
+// ---------------------------------------------------------------------------
+// Pins
+// ---------------------------------------------------------------------------
 
-const uint8_t EEPROM_MAGIC = 0xD5;
-const uint8_t EEPROM_VERSION = 1;
-const uint8_t VOLUME_MAX = 63;
-const uint16_t DELAY_MIN_MS = 100;
-const uint16_t DELAY_MAX_MS = 2000;
-const uint16_t DELAY_STEP_MS = 50;
+const int AMP_PIN = 3;
+const int PIN_VOL_UP = A5;
+const int PIN_VOL_DN = A4;
+const int PIN_AM = A3;
+const int PIN_FM = A2;
+
+// ---------------------------------------------------------------------------
+// VFD
+//
+// 0x0C clears and homes the cursor. 0x14 turns the cursor off.
+// Brightness is 0xFF then 0x04, which this glass treats as about 25%.
+// "520Khz" is 6 characters and leaves 14, so a line is 20 columns.
+// The spare columns hold a bouncing "---->" / "<----" sweep.
+// ---------------------------------------------------------------------------
+
+const int LCD_COLS = 20;
+const uint8_t VFD_CLEAR = 0x0C;
+const uint8_t VFD_CURSOR_OFF = 0x14;
+
+const unsigned long BUILD_DATE_MS = 2000;
+const unsigned long SPLASH_MS = 3500;
+const unsigned long STATUS_HOLD_MS = 900;
+const unsigned long BOOT_STATUS_MS = 1200;
+
+// ---------------------------------------------------------------------------
+// Switches and menu
+// ---------------------------------------------------------------------------
+
 const unsigned long DEBOUNCE_MS = 30;
 const unsigned long REPEAT_START_MS = 450;
 const unsigned long REPEAT_MS = 150;
 const unsigned long SAVE_HINT_MS = 700;
 const unsigned long SAVE_HOLD_MS = 1500;
 const unsigned long MENU_IDLE_MS = 30000;
+const unsigned long RELEASE_WAIT_MS = 8000;
+const unsigned long MENU_MESSAGE_MS = 700;
+const unsigned long VOLUME_SAVE_MS = 500;
+
+// ---------------------------------------------------------------------------
+// Radio
+//
+// The SparkFun library tunes FM in steps of 10 kHz, so 9730 is 97.30 MHz
+// and a step of 10 is 100 kHz. AM is tuned in kHz, so a step of 10 is one
+// US AM channel. FM wraps 97.3-108.0 MHz. AM wraps 520-1710 kHz.
+// Volume is property 0x4000 and runs from 0 to 63. radio.begin() always
+// puts the library's private counter back at 5, so the sketch writes the
+// chip volume itself after every begin().
+// ---------------------------------------------------------------------------
+
+const uint8_t VOLUME_MAX = 63;
+const uint8_t VOLUME_DEFAULT = 5;
 const int FM_START = 9730;
 const int FM_TOP = 10800;
 const int AM_START = 520;
 const int AM_TOP = 1710;
+const int TUNE_STEP = 10;
+
+const uint16_t DELAY_MIN_MS = 100;
+const uint16_t DELAY_MAX_MS = 2000;
+const uint16_t DELAY_STEP_MS = 50;
+const uint16_t DELAY_DEFAULT_MS = 200;
+
+// ---------------------------------------------------------------------------
+// EEPROM record. A bad magic byte or checksum falls back to defaults.
+// ---------------------------------------------------------------------------
+
+const uint8_t EEPROM_MAGIC = 0xD5;
+const uint8_t EEPROM_VERSION = 1;
 
 struct RadioSettings {
   uint8_t magic;
@@ -60,6 +120,7 @@ struct RadioSettings {
   uint8_t checksum;
 };
 
+// One throw of a center-off switch. "down" means the throw is held.
 struct Key {
   uint8_t pin;
   bool down;
@@ -68,6 +129,12 @@ struct Key {
   unsigned long lastRepeatMs;
 };
 
+// Sweep comet drawn in the columns left after the frequency.
+// Five characters when there is room ("---->"), three when the frequency
+// is long ("-->"). It bounces off each end of that gap.
+const int COMET_LONG = 5;
+const int COMET_SHORT = 3;
+
 Si4735 radio;
 RadioSettings settings;
 Key keyVolUp;
@@ -75,32 +142,38 @@ Key keyVolDn;
 Key keyAm;
 Key keyFm;
 
-int tunefreq = FM_START;
-unsigned long previoustuneMillis = 0;
-unsigned long quietUntil = 0;
+int tuneFreq = FM_START;
+int sweepPos = 0;
+int sweepDir = 1;
+unsigned long lastTuneMs = 0;
+unsigned long holdDisplayUntil = 0;
 unsigned long lastVolumeMs = 0;
-bool volumeDirty = false;
+bool volumeNeedsSave = false;
 
-uint8_t checksumOf(const RadioSettings &s) {
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+uint8_t checksumOf(const RadioSettings &stored) {
   uint8_t sum = 0xA5;
-  sum += s.magic;
-  sum += s.version;
-  sum += s.volume;
-  sum += s.band;
-  sum += (uint8_t)s.fmDelayMs;
-  sum += (uint8_t)(s.fmDelayMs >> 8);
-  sum += (uint8_t)s.amDelayMs;
-  sum += (uint8_t)(s.amDelayMs >> 8);
+  sum += stored.magic;
+  sum += stored.version;
+  sum += stored.volume;
+  sum += stored.band;
+  sum += (uint8_t)stored.fmDelayMs;
+  sum += (uint8_t)(stored.fmDelayMs >> 8);
+  sum += (uint8_t)stored.amDelayMs;
+  sum += (uint8_t)(stored.amDelayMs >> 8);
   return sum;
 }
 
 void setDefaults() {
   settings.magic = EEPROM_MAGIC;
   settings.version = EEPROM_VERSION;
-  settings.volume = 5;
+  settings.volume = VOLUME_DEFAULT;
   settings.band = FM;
-  settings.fmDelayMs = 200;
-  settings.amDelayMs = 200;
+  settings.fmDelayMs = DELAY_DEFAULT_MS;
+  settings.amDelayMs = DELAY_DEFAULT_MS;
 }
 
 void saveSettings() {
@@ -129,8 +202,17 @@ void loadSettings() {
   }
 }
 
+unsigned long scanDelayMs() {
+  if (settings.band == FM) return settings.fmDelayMs;
+  return settings.amDelayMs;
+}
+
+// ---------------------------------------------------------------------------
+// VFD text
+// ---------------------------------------------------------------------------
+
 void lcdClear() {
-  Serial.write(0x0C);
+  Serial.write(VFD_CLEAR);
 }
 
 void showStatus() {
@@ -154,22 +236,64 @@ void showDelay(bool editFm) {
   Serial.print("ms");
 }
 
-// Absolute volume. begin() always forces the library volume back to 5,
-// and that counter is private, so the chip is set directly.
-void writeVolume(uint8_t level) {
-  char cmd[13];
-  if (level > VOLUME_MAX) level = VOLUME_MAX;
-  sprintf(cmd, "1200400000%02X", (unsigned)level);
-  radio.sendCommand(cmd);
+// Prints the tuned frequency and returns how many columns that used.
+int printFrequency() {
+  if (settings.band == FM) {
+    Serial.print(tuneFreq / 100.0, 1);
+    Serial.print("Mhz");
+    return (tuneFreq >= 10000 ? 5 : 4) + 3;
+  }
+  Serial.print(tuneFreq);
+  Serial.print("Khz");
+  return (tuneFreq >= 1000 ? 4 : 3) + 3;
 }
 
-void killsoftmute() {
+// ---------------------------------------------------------------------------
+// Radio commands
+// ---------------------------------------------------------------------------
+
+// SET_PROPERTY for RX_VOLUME (0x4000). The last byte is the level, 0-63.
+void writeVolume(uint8_t level) {
+  char command[13];
+  if (level > VOLUME_MAX) level = VOLUME_MAX;
+  sprintf(command, "1200400000%02X", (unsigned)level);
+  radio.sendCommand(command);
+}
+
+// The chip normally mutes a weak signal. These property writes leave the
+// audio open, so the sweep stays audible between stations.
+void disableSoftMute() {
   radio.sendCommand("120013020000");
   radio.sendCommand("1200130300FF");
   radio.sendCommand("120033020000");
   radio.sendCommand("120033030000");
   radio.sendCommand("12001106007F");
 }
+
+void startRadio(uint8_t band) {
+  settings.band = band;
+  tuneFreq = (band == FM) ? FM_START : AM_START;
+  radio.begin(band);
+  writeVolume(settings.volume);
+  disableSoftMute();
+  radio.tuneFrequency(tuneFreq);
+}
+
+void changeVolume(int direction) {
+  int next = (int)settings.volume + direction;
+  if (next < 0 || next > VOLUME_MAX) return;
+
+  settings.volume = (uint8_t)next;
+  writeVolume(settings.volume);
+  volumeNeedsSave = true;
+  lastVolumeMs = millis();
+  showVolume();
+  holdDisplayUntil = millis() + STATUS_HOLD_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Switches
+// ---------------------------------------------------------------------------
 
 void initKey(Key &key, uint8_t pin) {
   key.pin = pin;
@@ -180,7 +304,7 @@ void initKey(Key &key, uint8_t pin) {
   pinMode(pin, INPUT_PULLUP);
 }
 
-// Returns true once when the key becomes pressed.
+// True once, when a throw is first held.
 bool updateKey(Key &key) {
   bool reading = digitalRead(key.pin) == LOW;
   unsigned long now = millis();
@@ -200,6 +324,7 @@ bool updateKey(Key &key) {
   return false;
 }
 
+// First repeat after the throw has been held, then a faster repeat.
 bool keyRepeat(Key &key) {
   if (!key.down) return false;
 
@@ -220,10 +345,26 @@ void pollKeys() {
   updateKey(keyFm);
 }
 
-unsigned long scanDelayMs() {
-  if (settings.band == FM) return settings.fmDelayMs;
-  return settings.amDelayMs;
+// Exactly one side of the band switch. Both pins low is not a real throw.
+bool bandHeldOneSide() {
+  return (keyAm.down || keyFm.down) && !(keyAm.down && keyFm.down);
 }
+
+void waitForRelease() {
+  unsigned long start = millis();
+  while (keyVolUp.down || keyVolDn.down || keyAm.down || keyFm.down) {
+    pollKeys();
+    if (millis() - start > RELEASE_WAIT_MS) break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scan-delay menu
+//
+// Entered by holding volume during the boot splash.
+// Volume up/down changes the number. A flick of FM or AM picks which delay.
+// Holding the band switch saves. Thirty seconds without a touch cancels.
+// ---------------------------------------------------------------------------
 
 void nudgeDelay(bool editFm, int step) {
   uint16_t value = editFm ? settings.fmDelayMs : settings.amDelayMs;
@@ -232,14 +373,6 @@ void nudgeDelay(bool editFm, int step) {
   if (next > (int)DELAY_MAX_MS) next = DELAY_MAX_MS;
   if (editFm) settings.fmDelayMs = (uint16_t)next;
   else settings.amDelayMs = (uint16_t)next;
-}
-
-void waitForRelease() {
-  unsigned long start = millis();
-  while (keyVolUp.down || keyVolDn.down || keyAm.down || keyFm.down) {
-    pollKeys();
-    if (millis() - start > 8000) break;
-  }
 }
 
 void finishMenu(bool save, uint16_t keepFm, uint16_t keepAm) {
@@ -253,7 +386,7 @@ void finishMenu(bool save, uint16_t keepFm, uint16_t keepAm) {
     lcdClear();
     Serial.print("Cancel");
   }
-  delay(700);
+  delay(MENU_MESSAGE_MS);
 }
 
 void runSetupMenu() {
@@ -272,8 +405,7 @@ void runSetupMenu() {
     bool dnEdge = updateKey(keyVolDn);
     bool amEdge = updateKey(keyAm);
     bool fmEdge = updateKey(keyFm);
-    // One (ON)-OFF-(ON) switch. Only one side can be held.
-    bool bandHeld = (keyAm.down || keyFm.down) && !(keyAm.down && keyFm.down);
+    bool bandHeld = bandHeldOneSide();
 
     if (fmEdge || amEdge) {
       editFm = fmEdge;
@@ -319,62 +451,92 @@ void runSetupMenu() {
   }
 }
 
-void startRadio(uint8_t band) {
-  settings.band = band;
-  tunefreq = (band == FM) ? FM_START : AM_START;
-  radio.begin(band);
-  writeVolume(settings.volume);
-  killsoftmute();
-  radio.tuneFrequency(tunefreq);
+// ---------------------------------------------------------------------------
+// Sweep comet
+//
+// Drawn with space, '-', '<', and '>'. Those are the plain ASCII glyphs
+// this VFD already shows. One step of the comet per station.
+// ---------------------------------------------------------------------------
+
+void printSweep(int cols) {
+  if (cols <= 0) return;
+
+  int comet = (cols >= 10) ? COMET_LONG : COMET_SHORT;
+  if (comet > cols) comet = cols;
+  int maxPos = cols - comet;
+  if (maxPos < 0) maxPos = 0;
+  if (sweepPos > maxPos) sweepPos = maxPos;
+  if (sweepPos < 0) sweepPos = 0;
+
+  for (int i = 0; i < cols; i++) {
+    bool inComet = i >= sweepPos && i < sweepPos + comet;
+    if (!inComet) Serial.print(' ');
+    else if (sweepDir > 0 && i == sweepPos + comet - 1) Serial.print('>');
+    else if (sweepDir < 0 && i == sweepPos) Serial.print('<');
+    else Serial.print('-');
+  }
+
+  sweepPos += sweepDir;
+  if (sweepPos >= maxPos) {
+    sweepPos = maxPos;
+    sweepDir = -1;
+  } else if (sweepPos <= 0) {
+    sweepPos = 0;
+    sweepDir = 1;
+  }
 }
 
-void changeVolume(int dir) {
-  int next = (int)settings.volume + dir;
-  if (next < 0 || next > VOLUME_MAX) return;
-
-  settings.volume = (uint8_t)next;
-  writeVolume(settings.volume);
-  volumeDirty = true;
-  lastVolumeMs = millis();
-  showVolume();
-  quietUntil = millis() + 900;
-}
+// ---------------------------------------------------------------------------
+// Sweep
+// ---------------------------------------------------------------------------
 
 void stepScan() {
   lcdClear();
 
   if (settings.band == FM) {
-    tunefreq += 10;
-    if (tunefreq > FM_TOP) tunefreq = FM_START;
-    radio.tuneFrequency(tunefreq);
-    Serial.print(tunefreq / 100.0, 1);
-    Serial.print("Mhz");
+    tuneFreq += TUNE_STEP;
+    if (tuneFreq > FM_TOP) tuneFreq = FM_START;
+    radio.tuneFrequency(tuneFreq);
   } else {
-    tunefreq += 10;
-    if (tunefreq > AM_TOP) tunefreq = AM_START;
-    killsoftmute();
-    radio.tuneFrequency(tunefreq);
-    Serial.print(tunefreq);
-    Serial.print("Khz");
+    tuneFreq += TUNE_STEP;
+    if (tuneFreq > AM_TOP) tuneFreq = AM_START;
+    disableSoftMute();
+    radio.tuneFrequency(tuneFreq);
   }
+
+  int used = printFrequency();
+  printSweep(LCD_COLS - used);
 }
 
+void showBandChange(uint8_t band) {
+  startRadio(band);
+  saveSettings();
+  showStatus();
+  holdDisplayUntil = millis() + STATUS_HOLD_MS;
+  lastTuneMs = millis();
+  volumeNeedsSave = false;
+}
+
+// ---------------------------------------------------------------------------
+// Arduino entry
+// ---------------------------------------------------------------------------
+
 void setup() {
-  pinMode(ampPin, OUTPUT);
-  digitalWrite(ampPin, LOW);
+  pinMode(AMP_PIN, OUTPUT);
+  digitalWrite(AMP_PIN, LOW);
 
   Serial.begin(9600);
   delay(10);
   Serial.write(0xFF);
-  Serial.write(0x04); // brightness 25%
+  Serial.write(0x04);
   Serial.println();
   Serial.print("ROM:");
   Serial.print(__DATE__);
 
-  initKey(keyVolUp, pinVolUp);
-  initKey(keyVolDn, pinVolDn);
-  initKey(keyAm, pinAm);
-  initKey(keyFm, pinFm);
+  initKey(keyVolUp, PIN_VOL_UP);
+  initKey(keyVolDn, PIN_VOL_DN);
+  initKey(keyAm, PIN_AM);
+  initKey(keyFm, PIN_FM);
   loadSettings();
 
   unsigned long splashStart = millis();
@@ -391,7 +553,7 @@ void setup() {
   }
 
   lcdClear();
-  Serial.write(0x14);
+  Serial.write(VFD_CURSOR_OFF);
 
   if (enterSetup) {
     waitForRelease();
@@ -400,10 +562,10 @@ void setup() {
   }
 
   startRadio(settings.band);
-  digitalWrite(ampPin, HIGH);
+  digitalWrite(AMP_PIN, HIGH);
   showStatus();
-  quietUntil = millis() + 1200;
-  previoustuneMillis = millis();
+  holdDisplayUntil = millis() + BOOT_STATUS_MS;
+  lastTuneMs = millis();
 }
 
 void loop() {
@@ -412,39 +574,27 @@ void loop() {
   bool amEdge = updateKey(keyAm);
   bool fmEdge = updateKey(keyFm);
 
+  // Ignore the impossible case of both volume throws reading held.
   if (!(keyVolUp.down && keyVolDn.down)) {
     if ((upEdge || keyRepeat(keyVolUp)) && !keyVolDn.down) changeVolume(1);
     if ((dnEdge || keyRepeat(keyVolDn)) && !keyVolUp.down) changeVolume(-1);
   }
 
-  // AM and FM are opposite throws of one switch, so both pins low is ignored.
-  // Time the status message after begin(), which blocks for several hundred ms.
+  // begin() blocks, so the "FM vol" message is timed after it returns.
+  // Both band pins low is ignored. That is not a gesture this switch can make.
   if (!(keyAm.down && keyFm.down)) {
-    if (amEdge && !keyFm.down) {
-      startRadio(AM);
-      saveSettings();
-      showStatus();
-      quietUntil = millis() + 900;
-      previoustuneMillis = millis();
-      volumeDirty = false;
-    } else if (fmEdge && !keyAm.down) {
-      startRadio(FM);
-      saveSettings();
-      showStatus();
-      quietUntil = millis() + 900;
-      previoustuneMillis = millis();
-      volumeDirty = false;
-    }
+    if (amEdge && !keyFm.down) showBandChange(AM);
+    else if (fmEdge && !keyAm.down) showBandChange(FM);
   }
 
-  if (volumeDirty && (millis() - lastVolumeMs) > 500) {
+  if (volumeNeedsSave && (millis() - lastVolumeMs) > VOLUME_SAVE_MS) {
     saveSettings();
-    volumeDirty = false;
+    volumeNeedsSave = false;
   }
 
   unsigned long now = millis();
-  if (now >= quietUntil && (now - previoustuneMillis) >= scanDelayMs()) {
-    previoustuneMillis = now;
+  if (now >= holdDisplayUntil && (now - lastTuneMs) >= scanDelayMs()) {
+    lastTuneMs = now;
     stepScan();
   }
 }

@@ -26,7 +26,7 @@ The SI4735 can tune shortwave and longwave. This sketch does not. It stays on th
 
 - Arduino Uno, or any ATmega328P board with the Uno pinout. The radio library bit-bangs nothing; it uses the hardware SPI registers.
 - [SparkFun SI4735 AM & FM Shield](https://github.com/sparkfun/SI4735_AM_FM_Shield) (DEV-10342). Schematic in this repo: `SI4735 Shield-v12.pdf`. The shield design is SparkFun's, Creative Commons ShareAlike 3.0.
-- Serial display at 9600 baud. Lines are written for a 16-column display.
+- NEC FIPC8367 character VFD at 9600 baud, 20 columns. `520Khz` leaves 14 columns. Those columns show a bouncing `---->` / `<----` sweep, one step per station. The marks are space, hyphen, and angle brackets.
 - Audio amp enabled on pin 3. The pin stays low until the first station is tuned.
 - Two momentary (ON)-OFF-(ON) switches, each throw wired to ground, internal pull-ups. Center is off, and the switch springs back. The two throws of one switch cannot be on at the same time.
   - Volume: A5 up, center, A4 down
